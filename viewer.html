@@ -1,0 +1,768 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>SFEN Viewer</title>
+    <style>
+        * { box-sizing: border-box; }
+        body { font-family: sans-serif; margin: 0; padding: 5px; width: 800px; height: 600px; overflow: hidden; font-size: 12px; }
+        h2 { margin: 0 0 5px 0; font-size: 14px; }
+        .top-bar { display: flex; align-items: center; gap: 10px; margin-bottom: 5px; }
+        select { font-size: 12px; max-width: 300px; }
+        .main { display: flex; gap: 15px; height: calc(600px - 40px); }
+        .left-pane { width: 340px; display: flex; flex-direction: column; align-items: center; }
+        .komadai { border: 1px solid #ccc; width: 100%; padding: 3px; background: #f9f9f9; height: 120px; overflow-y: auto; box-sizing: border-box; font-size: 12px; }
+        .komadai-title { font-weight: bold; font-size: 11px; margin-bottom: 2px; }
+        table.board { border-collapse: collapse; border: 2px solid #333; margin: 5px 0; }
+        table.board td { border: 1px solid #888; width: 30px; height: 30px; text-align: center; vertical-align: middle; font-size: 15px; font-weight: bold; padding: 0; }
+        .right-pane { width: 430px; overflow-y: auto; padding-right: 5px; }
+        .info-box { background: #f0f0f0; padding: 5px; margin-bottom: 5px; border-radius: 4px; }
+        p { margin: 3px 0; }
+        pre { background: #fff; border: 1px solid #ccc; padding: 5px; margin: 3px 0; white-space: pre-wrap; word-break: break-all; font-size: 11px; max-height: 80px; overflow-y: auto; }
+        .white-piece { color: #0055cc; }
+        .controls { display: flex; gap: 5px; margin-bottom: 5px; }
+        .controls button { padding: 3px 10px; font-size: 12px; cursor: pointer; }
+        .active-move { font-weight: bold; color: red; }
+    </style>
+</head>
+<body>
+    <div class="top-bar">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+            <h2 style="margin:5px 0;">将棋の裸玉局面における弱解決に関する研究</h2>
+        </div>
+    </div>
+
+    <div class="main" id="viewerContainer" style="display: none;">
+        <div class="left-pane">
+            <div class="komadai" id="whiteHand">
+                <div class="komadai-title">後手持駒 (White)</div>
+                <div id="whiteHandContent"></div>
+            </div>
+            
+            <table class="board" id="shogiBoard"></table>
+            
+            <div class="komadai" id="blackHand">
+                <div class="komadai-title">先手持駒 (Black)</div>
+                <div id="blackHandContent"></div>
+            </div>
+        </div>
+        
+        <div class="right-pane">
+            <div id="progressInfo" style="font-size:12px; font-weight:bold; color:#333; margin-bottom:2px;"></div>
+            <div id="etaInfo" style="font-size:11px; color:#666; margin-bottom:5px;"></div>
+            <div id="filterControls" style="display:none; font-size:12px; margin-bottom:5px;">
+                <label><input type="radio" name="mateFilter" value="all" checked> すべて</label>
+                <label><input type="radio" name="mateFilter" value="mate"> 詰みのみ</label>
+                <label><input type="radio" name="mateFilter" value="timeout"> 詰み未発見</label>
+                <label><input type="radio" name="mateFilter" value="nomate"> 詰みなし</label>
+                <button id="clearFiltersBtn" style="margin-left:10px; font-size:11px; cursor:pointer; padding:2px 8px; border:1px solid #aaa; border-radius:3px; background:#eee;">Clear</button>
+            </div>
+            <div id="pieceFilters" style="display:none; flex-wrap:wrap; gap:2px; margin-bottom:5px;"></div>
+            <select id="positionSelect" size="8" style="display:none; width:100%; font-size:11px; font-family:monospace; margin-bottom:5px;"></select>
+            <div class="info-box">
+                <p><strong>手数:</strong> <span id="stepsInfo"></span> 手詰 <span id="winInfo"></span></p>
+                <p><strong>最善手:</strong> <span id="bestmoveInfo"></span></p>
+            </div>
+            <p><strong id="mateTurnLabel">詰み手順再生:</strong> <span id="plyCounter"></span></p>
+            <div class="controls">
+                <button id="btnStart">&lt;&lt;</button>
+                <button id="btnPrev">&lt;</button>
+                <button id="btnNext">&gt;</button>
+                <button id="btnEnd">&gt;&gt;</button>
+            </div>
+            <div id="mateDisplay" style="background:#fff; border:1px solid #ccc; padding:5px; font-size:11px; line-height:1.4; max-height:150px; overflow-y:auto; word-break:break-all;"></div>
+            
+            <div style="font-size: 11px; color: #555; text-align: left; margin-top: 10px; background: #f9f9f9; padding: 5px; border-radius: 4px; border: 1px solid #eee;">
+                【<span id="footerPositionName">1局面</span>における持駒の全組み合わせ数】 飛角(各3通り) × 金銀桂香(各5通り) × 歩(19通り)<br>
+                3 × 3 × 5 × 5 × 5 × 5 × 19 = 106,875 通り<br><br>
+                【探索エンジン】 Suisho-BM 1.2.2 (Suisho-BM-AVX2.exe)<br>
+                【探索時間制限】 一律 10 秒 （10秒で詰み未発見の場合はその時点での最善手を登録）<br>
+                【計算環境】 AMD Ryzen 5 7430U with Radeon Graphics / 16GB RAM
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let jsonData = [];
+        let stateHistory = [];
+        let currentPly = 0;
+        let currentMoves = [];
+        let pieceReq = { R:0, B:0, G:0, S:0, N:0, L:0, P:0 };
+
+        function initPieceFilters() {
+            const pieces = [
+                {char:'飛', code:'R', count:2},
+                {char:'角', code:'B', count:2},
+                {char:'金', code:'G', count:4},
+                {char:'銀', code:'S', count:4},
+                {char:'桂', code:'N', count:4},
+                {char:'香', code:'L', count:4},
+                {char:'歩', code:'P', count:18}
+            ];
+            const pf = document.getElementById('pieceFilters');
+            if (pf) pf.innerHTML = '';
+            pieces.forEach(p => {
+                for(let i=0; i<p.count; i++){
+                    let btn = document.createElement('div');
+                    btn.textContent = p.char;
+                    btn.style.width = '18px';
+                    btn.style.height = '18px';
+                    btn.style.border = '1px solid #ccc';
+                    btn.style.borderRadius = '3px';
+                    btn.style.cursor = 'pointer';
+                    btn.style.textAlign = 'center';
+                    btn.style.lineHeight = '16px';
+                    btn.style.fontSize = '11px';
+                    btn.style.userSelect = 'none';
+                    btn.style.background = '#fff';
+                    btn.dataset.code = p.code;
+                    btn.dataset.active = "false";
+                    btn.onclick = () => {
+                        let active = btn.dataset.active === "true";
+                        btn.dataset.active = !active;
+                        btn.style.background = active ? "#fff" : "#aaddff";
+                        btn.style.borderColor = active ? "#ccc" : "#0055ff";
+                        pieceReq[p.code] += active ? -1 : 1;
+                        renderList();
+                    };
+                    if (pf) pf.appendChild(btn);
+                }
+            });
+        }
+        
+        function getSenteHandCounts(handStr) {
+            let counts = { R:0, B:0, G:0, S:0, N:0, L:0, P:0 };
+            if (!handStr || handStr === '-') return counts;
+            let numStr = "";
+            for (let char of handStr) {
+                if (char >= '0' && char <= '9') {
+                    numStr += char;
+                } else {
+                    if (char === char.toUpperCase() && counts[char] !== undefined) {
+                        counts[char] = numStr ? parseInt(numStr) : 1;
+                    }
+                    numStr = "";
+                }
+            }
+            return counts;
+        }
+        
+        let currentSenteX = '5', currentSenteY = 'i', currentGoteX = '1', currentGoteY = 'a';
+        let progressHistory = [];
+        
+        window.onload = () => {
+            fetchPositionFile('5', 'i', '1', 'a');
+            
+            setInterval(() => {
+                fetchPositionFile(currentSenteX, currentSenteY, currentGoteX, currentGoteY, true);
+            }, 60000);
+        };
+        
+        async function fetchPositionFile(sente_x, sente_y, gote_x, gote_y, isAutoReload = false) {
+            if (!isAutoReload) {
+                progressHistory = [];
+            }
+            currentSenteX = sente_x;
+            currentSenteY = sente_y;
+            currentGoteX = gote_x;
+            currentGoteY = gote_y;
+            
+            let folder = `${sente_x}${sente_y}K${gote_x}${gote_y}k`;
+            document.getElementById('footerPositionName').textContent = folder + "局面";
+            
+            let fileL = `${folder}/${folder}.jsonl`;
+            let fileJ = `${folder}/${folder}.json`;
+            
+            try {
+                let res = await fetch(fileL, { cache: 'no-store' });
+                if (!res.ok) {
+                    res = await fetch(fileJ, { cache: 'no-store' });
+                    if (!res.ok) throw new Error('Not found');
+                }
+                
+                let text = await res.text();
+                text = text.trim();
+                let parsedData = [];
+                if (text.startsWith('[')) {
+                    try { parsedData = JSON.parse(text); } catch(e) { console.error(e); }
+                } else {
+                    let lines = text.split('\n');
+                    for (let l of lines) {
+                        l = l.trim();
+                        if (!l) continue;
+                        try {
+                            parsedData.push(JSON.parse(l));
+                        } catch(e) {
+                            console.warn("Skipping line:", l);
+                        }
+                    }
+                }
+                jsonData = parsedData;
+                
+                initViewer(isAutoReload);
+                
+            } catch (err) {
+                console.error("Fetch/parse error:", err);
+                let emptySfen = "9/9/9/9/9/9/9/9/9 b RB2G2S2N2L9Prb2g2s2n2l9p 1";
+                let board = [];
+                for(let i=0;i<9;i++) board.push(['','','','','','','','','']);
+                board[sente_y.charCodeAt(0)-97][9-sente_x] = 'K';
+                board[gote_y.charCodeAt(0)-97][9-gote_x] = 'k';
+                let newBoardSfen = generateBoardSfen(board);
+                
+                jsonData = [{msfen: newBoardSfen.replace(/\//g, '_') + '0b0RB2G2S2N2L9Prb2g2s2n2l9p', steps: 0, bestmove: "", mate: ""}];
+                initViewer(isAutoReload);
+                if (!isAutoReload) {
+                    alert(`探索結果(${folder})の読み込みに失敗しました。\nエラー詳細: ${err.message}\n\n※ローカルファイル(file:///)として開いている場合は、http://localhost/tsume/viewer.html からアクセスしてください。`);
+                }
+            }
+        }
+
+        document.querySelectorAll('input[name="mateFilter"]').forEach(radio => {
+            radio.addEventListener('change', renderList);
+        });
+
+        document.getElementById('clearFiltersBtn').addEventListener('click', () => {
+            pieceReq = { R:0, B:0, G:0, S:0, N:0, L:0, P:0 };
+            document.querySelectorAll('#pieceFilters div').forEach(btn => {
+                btn.dataset.active = "false";
+                btn.style.background = "#fff";
+                btn.style.borderColor = "#ccc";
+            });
+            document.querySelector('input[name="mateFilter"][value="all"]').checked = true;
+            renderList();
+        });
+
+        function renderList(restoreValue = null, isAutoReload = false) {
+            const select = document.getElementById('positionSelect');
+            let prevValue = restoreValue !== null ? restoreValue : select.value;
+            select.innerHTML = '';
+            
+            const filterValue = document.querySelector('input[name="mateFilter"]:checked').value;
+            
+            jsonData.forEach((data, index) => {
+                const isMate = data.steps > 0;
+                const isTimeoutBestmove = !isMate && Boolean(data.bestmove && data.bestmove !== 'nomove');
+                const isNoMate = !isMate && !isTimeoutBestmove;
+                
+                if (filterValue === 'mate' && !isMate) return;
+                if (filterValue === 'timeout' && !isTimeoutBestmove) return;
+                if (filterValue === 'nomate' && !isNoMate) return;
+                
+                let sfenParts = msfenToSfen(data.msfen).split(' ');
+                let handStr = sfenParts.length > 2 ? sfenParts[2] : "-";
+                let counts = getSenteHandCounts(handStr);
+                
+                if (counts.R < pieceReq.R || counts.B < pieceReq.B ||
+                    counts.G < pieceReq.G || counts.S < pieceReq.S ||
+                    counts.N < pieceReq.N || counts.L < pieceReq.L ||
+                    counts.P < pieceReq.P) {
+                    return;
+                }
+                
+                const opt = document.createElement('option');
+                opt.value = index;
+                
+                let result = `詰みなし`;
+                if (isMate) {
+                    result = `${data.steps}手詰`;
+                } else if (isTimeoutBestmove) {
+                    result = `詰み未発見 (最善手: ${data.bestmove})`;
+                }
+                
+                const handSnippet = data.msfen.split('0').length > 2 ? data.msfen.split('0')[2].substring(0, 8) : "";
+                opt.textContent = `[${index+1}] ${handSnippet}... - ${result}`;
+                select.appendChild(opt);
+            });
+            
+            if (select.options.length > 0) {
+                if (prevValue && Array.from(select.options).some(o => o.value === prevValue)) {
+                    select.value = prevValue;
+                    if (!isAutoReload) {
+                        loadPosition(select.value);
+                    }
+                } else {
+                    select.selectedIndex = 0;
+                    loadPosition(select.value);
+                }
+            } else {
+                document.getElementById('stepsInfo').textContent = '-';
+                document.getElementById('bestmoveInfo').textContent = '-';
+                document.getElementById('mateTurnLabel').textContent = '手順再生:';
+                document.getElementById('winInfo').textContent = '';
+                document.getElementById('mateDisplay').innerHTML = '該当する局面がありません。';
+                document.getElementById('plyCounter').textContent = '';
+                currentMoves = [];
+                currentPly = 0;
+            }
+        }
+
+        let isUIInitialized = false;
+
+        function initViewer(isAutoReload = false) {
+            document.getElementById('positionSelect').style.display = 'block';
+            document.getElementById('filterControls').style.display = 'block';
+            document.getElementById('pieceFilters').style.display = 'flex';
+            document.getElementById('viewerContainer').style.display = 'flex';
+            
+            const select = document.getElementById('positionSelect');
+            let currentValue = select.value;
+            
+            if (!isUIInitialized) {
+                initPieceFilters();
+                document.getElementById('positionSelect').onchange = (e) => loadPosition(e.target.value);
+                isUIInitialized = true;
+            }
+            
+            renderList(isAutoReload ? currentValue : null, isAutoReload);
+            
+            const totalCombs = 106875;
+            const percent = ((jsonData.length / totalCombs) * 100).toFixed(2);
+            document.getElementById('progressInfo').textContent = `探索済み局面数 : ${jsonData.length.toLocaleString()}/${totalCombs.toLocaleString()} (${percent}%)`;
+            
+            updateETA();
+        }
+
+        function updateETA() {
+            const now = Date.now();
+            const count = jsonData.length;
+            const totalCombs = 106875;
+            
+            if (progressHistory.length === 0 || progressHistory[progressHistory.length - 1].count !== count) {
+                progressHistory.push({ time: now, count: count });
+            }
+            if (progressHistory.length > 20) {
+                progressHistory.shift();
+            }
+            
+            let etaText = "探索終了予測時間 : 計算中...";
+            
+            if (progressHistory.length > 1 && count < totalCombs) {
+                const oldest = progressHistory[0];
+                const newest = progressHistory[progressHistory.length - 1];
+                
+                const timeDiffSec = (newest.time - oldest.time) / 1000;
+                const countDiff = newest.count - oldest.count;
+                
+                if (timeDiffSec > 0 && countDiff > 0) {
+                    const itemsPerSec = countDiff / timeDiffSec;
+                    const remainingItems = totalCombs - count;
+                    const remainingSec = Math.round(remainingItems / itemsPerSec);
+                    
+                    if (remainingSec > 0) {
+                        const days = Math.floor(remainingSec / 86400);
+                        const hours = Math.floor((remainingSec % 86400) / 3600);
+                        const mins = Math.floor((remainingSec % 3600) / 60);
+                        
+                        let timeStr = "";
+                        if (days > 0) timeStr += `${days}日 `;
+                        if (hours > 0) timeStr += `${hours}時間 `;
+                        timeStr += `${mins}分`;
+                        if (!timeStr) timeStr = "1分未満";
+                        
+                        etaText = `探索終了予測時間 : 約 ${timeStr}`;
+                    }
+                }
+            } else if (count >= totalCombs) {
+                etaText = "探索終了予測時間 : 探索完了！";
+            }
+            
+            document.getElementById('etaInfo').textContent = etaText;
+        }
+
+        function msfenToSfen(msfen) {
+            return msfen.replace(/_/g, '/').replace(/x/g, '+').replace('0b0', ' b ').replace('0w0', ' w ');
+        }
+
+        function createGameState(sfen) {
+            let parts = sfen.split(' ');
+            let board = [], hand = { b: {}, w: {} };
+            parts[0].split('/').forEach(row => {
+                let r = [], chars = row.split(''), c = 0;
+                while (c < chars.length) {
+                    if (chars[c] >= '1' && chars[c] <= '9') {
+                        for (let i = 0; i < parseInt(chars[c]); i++) r.push('');
+                    } else {
+                        let p = chars[c];
+                        if (p === '+') p += chars[++c];
+                        r.push(p);
+                    }
+                    c++;
+                }
+                board.push(r);
+            });
+            
+            let h = parts.length > 2 ? parts[2] : '-';
+            if (h !== '-') {
+                let i = 0;
+                while (i < h.length) {
+                    let num = '';
+                    while (h[i] >= '0' && h[i] <= '9') num += h[i++];
+                    let p = h[i];
+                    let cnt = num ? parseInt(num) : 1;
+                    if (p >= 'A' && p <= 'Z') hand.b[p] = (hand.b[p] || 0) + cnt;
+                    else hand.w[p.toUpperCase()] = (hand.w[p.toUpperCase()] || 0) + cnt;
+                    i++;
+                }
+            }
+            return { board, turn: parts[1], hand };
+        }
+
+        function applyMove(state, move) {
+            let next = {
+                board: state.board.map(r => [...r]),
+                turn: state.turn === 'b' ? 'w' : 'b',
+                hand: { b: {...state.hand.b}, w: {...state.hand.w} }
+            };
+            
+            if (move[1] === '*') {
+                let p = move[0];
+                let f = 9 - parseInt(move[2]), r = move.charCodeAt(3) - 97;
+                next.board[r][f] = state.turn === 'b' ? p : p.toLowerCase();
+                next.hand[state.turn][p]--;
+            } else {
+                let f1 = 9 - parseInt(move[0]), r1 = move.charCodeAt(1) - 97;
+                let f2 = 9 - parseInt(move[2]), r2 = move.charCodeAt(3) - 97;
+                let prom = move.length > 4 && move[4] === '+';
+                let p = next.board[r1][f1];
+                next.board[r1][f1] = '';
+                
+                let cap = next.board[r2][f2];
+                if (cap) {
+                    let base = cap.replace('+', '').toUpperCase();
+                    next.hand[state.turn][base] = (next.hand[state.turn][base] || 0) + 1;
+                }
+                if (prom) p = '+' + p;
+                next.board[r2][f2] = p;
+            }
+            return next;
+        }
+
+        function loadPosition(index) {
+            const data = jsonData[index];
+            const sfen = msfenToSfen(data.msfen);
+            if (data.steps === 0 && data.bestmove && data.bestmove !== 'nomove') {
+                document.getElementById('bestmoveInfo').textContent = `${data.bestmove} (詰み未発見・最善手)`;
+            } else {
+                document.getElementById('bestmoveInfo').textContent = data.bestmove;
+            }
+            
+            let isHisshi = false;
+            if (data.steps > 0 && data.mate) {
+                let firstMove = data.mate.trim().split(' ')[0];
+                if (firstMove) {
+                    isHisshi = !checkIsCheck(data.msfen, firstMove);
+                }
+            }
+            
+            document.getElementById('stepsInfo').textContent = data.steps > 0 ? data.steps : "-";
+            
+            const turnChar = sfen.split(' ')[1];
+            if (data.steps > 0) {
+                let action = isHisshi ? '必至' : '詰み';
+                document.getElementById('mateTurnLabel').textContent = (turnChar === 'b' ? `先手(Black)の${action}` : `後手(White)の${action}`) + '手順再生:';
+                document.getElementById('winInfo').textContent = `（${data.steps}手で${turnChar === 'b' ? '先手' : '後手'}の勝ち）`;
+            } else {
+                document.getElementById('mateTurnLabel').textContent = '手順再生:';
+                document.getElementById('winInfo').textContent = '';
+            }
+            
+            currentMoves = data.mate ? data.mate.trim().split(' ') : [];
+            if (currentMoves.length === 1 && currentMoves[0] === "") currentMoves = [];
+            
+            stateHistory = [createGameState(sfen)];
+            for (let mv of currentMoves) {
+                stateHistory.push(applyMove(stateHistory[stateHistory.length - 1], mv));
+            }
+            
+            currentPly = 0;
+            updateView();
+        }
+
+        function updateView() {
+            let state = stateHistory[currentPly];
+            renderBoard(state.board);
+            renderHand(state.hand);
+            
+            document.getElementById('plyCounter').textContent = `[${currentPly} / ${currentMoves.length}]`;
+            
+            let mateHtml = currentMoves.map((mv, i) => {
+                if (i === currentPly - 1) return `<span class="active-move">${mv}</span>`;
+                return mv;
+            }).join(' ');
+            document.getElementById('mateDisplay').innerHTML = mateHtml || 'なし';
+        }
+
+        function renderBoard(board) {
+            const tbody = document.getElementById('shogiBoard');
+            tbody.innerHTML = '';
+            board.forEach((row, rIdx) => {
+                let tr = document.createElement('tr');
+                row.forEach((p, fIdx) => {
+                    let td = document.createElement('td');
+                    td.dataset.r = rIdx;
+                    td.dataset.f = fIdx;
+                    
+                    td.ondragover = (e) => e.preventDefault();
+                    td.ondrop = handleDrop;
+                    
+                    if (p) {
+                        let span = document.createElement('span');
+                        span.textContent = p;
+                        if ((p === 'K' || p === 'k') && currentPly === 0) {
+                            span.draggable = true;
+                            span.style.cursor = 'grab';
+                            span.ondragstart = (e) => {
+                                e.dataTransfer.setData('text/plain', JSON.stringify({type: 'board', piece: p, r: rIdx, f: fIdx}));
+                            };
+                        }
+                        const isWhite = (p === p.toLowerCase() && p[0] !== '+') || (p[0] === '+' && p[1] === p[1].toLowerCase());
+                        if (isWhite && p) span.className = 'white-piece';
+                        td.appendChild(span);
+                    }
+                    tr.appendChild(td);
+                });
+                tbody.appendChild(tr);
+            });
+        }
+        
+        function handleDrop(e) {
+            e.preventDefault();
+            if (currentPly !== 0) return;
+            let data;
+            try {
+                data = JSON.parse(e.dataTransfer.getData('text/plain'));
+            } catch(err) { return; }
+            
+            if (data.type !== 'board') return; // Ignore hand pieces dropped on board
+            
+            let targetTd = e.target.tagName === 'TD' ? e.target : e.target.parentElement;
+            if (targetTd.tagName !== 'TD') return;
+            
+            let newR = parseInt(targetTd.dataset.r);
+            let newF = parseInt(targetTd.dataset.f);
+            let board = stateHistory[0].board.map(r => [...r]);
+            
+            if (board[newR][newF] !== '') return; // Cannot drop on another piece
+            
+            board[data.r][data.f] = '';
+            board[newR][newF] = data.piece;
+            
+            let targetSfen = generateBoardSfen(board);
+            let targetMsfenPrefix = targetSfen.replace(/\//g, '_').replace(/\+/g, 'x');
+            
+            // Re-find coordinates for filename
+            let sente_x, sente_y, gote_x, gote_y;
+            for (let r = 0; r < 9; r++) {
+                for (let f = 0; f < 9; f++) {
+                    if (board[r][f] === 'K') { sente_x = 9-f; sente_y = String.fromCharCode(97+r); }
+                    if (board[r][f] === 'k') { gote_x = 9-f; gote_y = String.fromCharCode(97+r); }
+                }
+            }
+            
+            if (sente_x && gote_x) {
+                // 先手玉と後手玉の重なり・8近傍のチェック
+                let sx = sente_x;
+                let sy = sente_y.charCodeAt(0) - 97;
+                let gx = gote_x;
+                let gy = gote_y.charCodeAt(0) - 97;
+                if (Math.max(Math.abs(sx - gx), Math.abs(sy - gy)) <= 1) {
+                    alert("王同士が重なる位置、または8近傍（隣接するマス）に配置することはできません。");
+                    return;
+                }
+                fetchPositionFile(sente_x, sente_y, gote_x, gote_y);
+            }
+        }
+        
+        function generateBoardSfen(board) {
+            let rows = [];
+            for(let r=0; r<9; r++){
+                let empty = 0;
+                let rowStr = '';
+                for(let f=0; f<9; f++){
+                    if(board[r][f] === '') {
+                        empty++;
+                    } else {
+                        if(empty > 0) { rowStr += empty; empty = 0; }
+                        rowStr += board[r][f];
+                    }
+                }
+                if(empty > 0) rowStr += empty;
+                rows.push(rowStr);
+            }
+            return rows.join('/');
+        }
+
+        function generateHandSfen(hand) {
+            let res = '';
+            const order = ['R', 'B', 'G', 'S', 'N', 'L', 'P'];
+            for (let p of order) {
+                let cnt = hand.b[p] || 0;
+                if (cnt > 0) res += (cnt > 1 ? cnt : '') + p;
+            }
+            for (let p of order) {
+                let cnt = hand.w[p] || 0;
+                if (cnt > 0) res += (cnt > 1 ? cnt : '') + p.toLowerCase();
+            }
+            return res === '' ? '-' : res;
+        }
+
+        function renderHand(hand) {
+            const order = ['R', 'B', 'G', 'S', 'N', 'L', 'P'];
+            
+            const createHandElements = (playerHand, isBlack) => {
+                let container = document.createElement('div');
+                container.style.display = 'flex';
+                container.style.gap = '5px';
+                container.style.flexWrap = 'wrap';
+                
+                order.forEach(p => {
+                    let count = playerHand[p] || 0;
+                    for (let i = 0; i < count; i++) {
+                        let span = document.createElement('span');
+                        span.textContent = p;
+                        span.style.padding = '2px 5px';
+                        span.style.border = '1px solid #aaa';
+                        span.style.borderRadius = '3px';
+                        span.style.background = isBlack ? '#f0f0f0' : '#e6f2ff';
+                        if (!isBlack) span.className = 'white-piece';
+                        
+                        if (currentPly === 0) {
+                            span.draggable = true;
+                            span.style.cursor = 'grab';
+                            span.ondragstart = (e) => {
+                                e.dataTransfer.setData('text/plain', JSON.stringify({type: 'hand', piece: p, from: isBlack ? 'b' : 'w'}));
+                            };
+                        }
+                        
+                        container.appendChild(span);
+                    }
+                });
+                return container.children.length > 0 ? container : document.createTextNode('なし');
+            };
+
+            const bContainer = document.getElementById('blackHandContent');
+            bContainer.innerHTML = '';
+            bContainer.appendChild(createHandElements(hand.b, true));
+
+            const wContainer = document.getElementById('whiteHandContent');
+            wContainer.innerHTML = '';
+            wContainer.appendChild(createHandElements(hand.w, false));
+        }
+
+        document.getElementById('blackHand').ondragover = (e) => e.preventDefault();
+        document.getElementById('whiteHand').ondragover = (e) => e.preventDefault();
+        
+        document.getElementById('blackHand').ondrop = (e) => handleHandDrop(e, 'b');
+        document.getElementById('whiteHand').ondrop = (e) => handleHandDrop(e, 'w');
+        
+        function handleHandDrop(e, toPlayer) {
+            e.preventDefault();
+            if (currentPly !== 0) return;
+            
+            let data;
+            try {
+                data = JSON.parse(e.dataTransfer.getData('text/plain'));
+            } catch(err) { return; }
+            
+            if (data.type !== 'hand') return;
+            if (data.from === toPlayer) return; // Dropped in the same hand
+            
+            let p = data.piece;
+            let state = stateHistory[0];
+            
+            let newHand = { b: {...state.hand.b}, w: {...state.hand.w} };
+            newHand[data.from][p]--;
+            newHand[toPlayer][p] = (newHand[toPlayer][p] || 0) + 1;
+            
+            let targetSfen = `${generateBoardSfen(state.board)} ${state.turn} ${generateHandSfen(newHand)} 1`;
+            let targetMsfen = targetSfen.replace(/\//g, '_').replace(/\+/g, 'x').replace(/ /g, '0');
+            
+            let foundIndex = jsonData.findIndex(d => d.msfen === targetMsfen);
+            if (foundIndex !== -1) {
+                document.getElementById('positionSelect').value = foundIndex;
+                loadPosition(foundIndex);
+            } else {
+                alert('この持駒分配パターンの探索結果はまだ見つかりません。');
+            }
+        }
+
+        document.getElementById('btnStart').onclick = () => { currentPly = 0; updateView(); };
+        document.getElementById('btnPrev').onclick = () => { if (currentPly > 0) { currentPly--; updateView(); } };
+        document.getElementById('btnNext').onclick = () => { if (currentPly < currentMoves.length) { currentPly++; updateView(); } };
+        document.getElementById('btnEnd').onclick = () => { currentPly = currentMoves.length; updateView(); };
+
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'ArrowRight') document.getElementById('btnNext').click();
+            if (e.key === 'ArrowLeft') document.getElementById('btnPrev').click();
+        });
+        function checkIsCheck(msfen, move) {
+            let sfen = msfenToSfen(msfen);
+            let state = createGameState(sfen);
+            let nextState = applyMove(state, move);
+            let kx, ky;
+            for(let r=0; r<9; r++){
+                for(let f=0; f<9; f++){
+                    if(nextState.board[r][f] === 'k') { ky = r; kx = 9-f; }
+                }
+            }
+            return isAttackedByBlack(nextState.board, kx, ky);
+        }
+
+        function isAttackedByBlack(board, kx, ky) {
+            let f = 9 - kx;
+            let r = ky;
+            for (let i=0; i<9; i++) {
+                for (let j=0; j<9; j++) {
+                    let p = board[i][j];
+                    if (!p || p === p.toLowerCase()) continue;
+                    
+                    let df = f - j;
+                    let dr = r - i;
+                    let absDf = Math.abs(df);
+                    let absDr = Math.abs(dr);
+                    
+                    if (p === 'P') { if (df === 0 && dr === -1) return true; }
+                    else if (p === 'N') { if (absDf === 1 && dr === -2) return true; }
+                    else if (p === 'S') {
+                        if (absDf <= 1 && absDr <= 1) {
+                            if (!(absDf === 0 && dr === 1)) return true;
+                        }
+                    }
+                    else if (p === 'G' || p === '+P' || p === '+L' || p === '+N' || p === '+S') {
+                        if (absDf <= 1 && absDr <= 1) {
+                            if (!(absDf === 1 && dr === 1)) return true;
+                        }
+                    }
+                    else if (p === 'K') { if (absDf <= 1 && absDr <= 1) return true; }
+                    else if (p === 'B' || p === '+B') {
+                        if (absDf === absDr && isLineClear(board, j, i, f, r)) return true;
+                        if (p === '+B' && absDf <= 1 && absDr <= 1) return true;
+                    }
+                    else if (p === 'R' || p === '+R') {
+                        if ((df === 0 || dr === 0) && isLineClear(board, j, i, f, r)) return true;
+                        if (p === '+R' && absDf <= 1 && absDr <= 1) return true;
+                    }
+                    else if (p === 'L') {
+                        if (df === 0 && dr < 0 && isLineClear(board, j, i, f, r)) return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        function isLineClear(board, f1, r1, f2, r2) {
+            let df = Math.sign(f2 - f1);
+            let dr = Math.sign(r2 - r1);
+            let cf = f1 + df;
+            let cr = r1 + dr;
+            while (cf !== f2 || cr !== r2) {
+                if (board[cr][cf] !== '') return false;
+                cf += df;
+                cr += dr;
+            }
+            return true;
+        }
+    </script>
+</body>
+</html>
